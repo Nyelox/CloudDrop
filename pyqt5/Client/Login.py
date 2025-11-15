@@ -30,7 +30,6 @@ class WorkerThread(threading.Thread):
     def handle_login(self, data):
         username, password = data
 
-        print(f"🔍 Checking credentials for '{username}'...")
         time.sleep(1)
 
         try:
@@ -38,10 +37,8 @@ class WorkerThread(threading.Thread):
             message = Database_connection.handle_login(username, password)
 
             if message == "Login successful":
-                print(f"✅ {message}")
                 self.signals.success.emit(username)
             else:
-                print(f"❌ {message}")
                 self.signals.error.emit(message)
 
         except Exception as e:
@@ -86,7 +83,6 @@ class Login(QMainWindow):
             return
 
         self.task_queue.put(("login", (username, password)))
-        print("🔄 Starting login process...")
 
     def on_login_success(self, username):
         msg = QMessageBox(self)

@@ -1,4 +1,8 @@
 import pymysql
+from .auth import userauth
+
+
+auth = userauth()
 
 
 def handle_login(username, password):
@@ -8,6 +12,7 @@ def handle_login(username, password):
         user='root',
         password='Data230308data',
         database='userdata',
+        charset='utf8mb4'
     )
     cursor = con.cursor()
 
@@ -17,8 +22,10 @@ def handle_login(username, password):
     con.close()
 
     if result:
-        stored_password = result[0]
-        if password == stored_password:
+        stored_hash = result[0]
+        if isinstance(stored_hash, str):
+            stored_hash = stored_hash.encode('utf-8')
+        if auth.check_password(password, stored_hash):
             return "Login successful"
         else:
             return "Invalid username or password"
@@ -33,14 +40,18 @@ def handle_signup(username, password):
         user='root',
         password='Data230308data',
         database='userdata',
+        charset='utf8mb4'
     )
-    cursor = con.cursor()
+    mycursor = con.cursor()
 
-    cursor.execute('SELECT * FROM data WHERE username=%s', (username,))
-    if cursor.fetchone():
+    mycursor.execute('SELECT * FROM data WHERE username=%s', (username,))
+    if mycursor.fetchone():
         response = "Username already exists"
     else:
-        cursor.execute('INSERT INTO data(username, password) VALUES (%s, %s)', (username, password))
+        pwd_hash = auth.hash_password(password)
+        if isinstance(pwd_hash, bytes):
+            pwd_hash = pwd_hash.decode('utf-8')
+        mycursor.execute('INSERT INTO data(username, password) VALUES (%s, %s)', (username, pwd_hash))
         con.commit()
         response = "Sign Up successful"
 

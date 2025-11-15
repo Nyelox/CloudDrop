@@ -5,7 +5,7 @@ from Login import Login
 def main():
     app = QApplication(sys.argv)
 
-    # הצגת מסך הלוגין
+
     login_window = Login()
     login_window.show()
 

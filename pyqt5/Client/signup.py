@@ -29,18 +29,14 @@ class WorkerThread(threading.Thread):
     def handle_signup(self, data):
         username, password = data
 
-        print(f"🔍 Checking if username '{username}' exists...")
         time.sleep(1)
 
         try:
-            # Use the database_connection module
             message = Database_connection.handle_signup(username, password)
 
             if message == "Sign Up successful":
-                print(f"✅ {message}")
                 self.signals.success.emit(message)
             else:
-                print(f"❌ {message}")
                 self.signals.error.emit(message)
 
         except Exception as e:
@@ -90,7 +86,6 @@ class Signup(QMainWindow):
             return
 
         self.task_queue.put(("signup", (username, password)))
-        print("🔄 Starting signup process...")
 
     def on_signup_success(self, message):
         self.show_message(message)
