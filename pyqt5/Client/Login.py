@@ -67,10 +67,10 @@ class Login(QMainWindow):
         self.pushButton_login.clicked.connect(self.loginfunction)
         self.lineEdit_password.setEchoMode(QtWidgets.QLineEdit.Password)
 
-        self.label_register = QLabel('<a href="#" style="text-decoration: none; color: #0066cc;">Register</a>', self)
-        self.label_register.setTextFormat(Qt.RichText)
-        self.label_register.linkActivated.connect(self.open_register)
-        self.label_register.setGeometry(176, 172, 80, 14)
+        self.label_signup = QLabel('<a href="#" style="text-decoration: none; color: #0066cc;">Register</a>', self)
+        self.label_signup.setTextFormat(Qt.RichText)
+        self.label_signup.linkActivated.connect(self.open_signup)
+        self.label_signup.setGeometry(225, 211, 141, 16)
 
         self.home_window = None
 
@@ -111,7 +111,7 @@ class Login(QMainWindow):
         msg.setWindowTitle("Login")
         msg.exec_()
 
-    def open_register(self):
+    def open_signup(self):
         from signup import Signup
         self.signup_window = Signup()
         self.signup_window.show()

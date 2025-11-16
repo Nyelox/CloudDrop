@@ -68,9 +68,8 @@ class Signup(QMainWindow):
 
         self.label_login = QLabel('<a href="#" style="text-decoration: none; color: #0066cc;">Click here!</a>', self)
         self.label_login.setTextFormat(Qt.RichText)
-        self.label_login.setOpenExternalLinks(False)
         self.label_login.linkActivated.connect(self.go_to_login)
-        self.label_login.setGeometry(152, 174, 80, 14)
+        self.label_login.setGeometry(193, 223, 141, 16)
 
     def signup_function(self):
         username = self.lineEdit_userName.text().strip()
