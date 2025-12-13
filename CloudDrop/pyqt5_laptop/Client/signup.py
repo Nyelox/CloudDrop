@@ -1,0 +1,99 @@
+from Server import Database_connection
+
+import threading
+import queue
+import time
+
+from PyQt5 import QtWidgets
+from PyQt5.QtWidgets import QMainWindow, QMessageBox, QLabel
+from PyQt5.uic import loadUi
+from PyQt5.QtCore import Qt, QObject, pyqtSignal
+
+
+class WorkerThread(threading.Thread):
+    def __init__(self, task_queue, signals):
+        super().__init__(daemon=True)
+        self.task_queue = task_queue
+        self.signals = signals
+
+    def run(self):
+        while True:
+            try:
+                task_name, data = self.task_queue.get()
+                if task_name == "signup":
+                    self.handle_signup(data)
+            except Exception as e:
+                print(f"Error in worker: {e}")
+
+    def handle_signup(self, data):
+        username, password = data
+
+        time.sleep(1)
+
+        try:
+            message = Database_connection.handle_signup(username, password)
+
+            if message == "Sign Up successful":
+                self.signals.success.emit(message)
+            else:
+                self.signals.error.emit(message)
+
+        except Exception as e:
+            self.signals.error.emit(f"Error: {str(e)}")
+
+
+class WorkerSignals(QObject):
+    success = pyqtSignal(str)
+    error = pyqtSignal(str)
+
+
+class Signup(QMainWindow):
+    def __init__(self):
+        super(Signup, self).__init__()
+        loadUi('signup.ui', self)
+
+        self.task_queue = queue.Queue()
+
+        self.signals = WorkerSignals()
+        self.signals.success.connect(self.on_signup_success)
+        self.signals.error.connect(self.show_message)
+
+        self.worker = WorkerThread(self.task_queue, self.signals)
+        self.worker.start()
+
+        self.pushButton_signUp.clicked.connect(self.signup_function)
+        self.lineEdit_password.setEchoMode(QtWidgets.QLineEdit.Password)
+        self.lineEdit_confirmPassword.setEchoMode(QtWidgets.QLineEdit.Password)
+
+        self.label_login = QLabel('<a href="#" style="text-decoration: none; color: #0066cc;">Click here!</a>', self)
+        self.label_login.setTextFormat(Qt.RichText)
+        self.label_login.linkActivated.connect(self.go_to_login)
+        self.label_login.setGeometry(193, 223, 141, 16)
+
+    def signup_function(self):
+        username = self.lineEdit_userName.text().strip()
+        password = self.lineEdit_password.text()
+        confirm_password = self.lineEdit_confirmPassword.text()
+
+        if not username or not password or not confirm_password:
+            self.show_message("All fields are required")
+            return
+
+        if password != confirm_password:
+            self.show_message("Passwords do not match")
+            return
+
+        self.task_queue.put(("signup", (username, password)))
+
+    def on_signup_success(self, message):
+        self.show_message(message)
+        self.go_to_login()
+
+    def show_message(self, text):
+        QMessageBox.information(self, "Signup", text)
+
+    def go_to_login(self):
+            from Login import Login
+            self.login_window = Login()
+            self.login_window.show()
+            self.close()
