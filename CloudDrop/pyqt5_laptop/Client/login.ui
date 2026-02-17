@@ -11,7 +11,11 @@
    </rect>
   </property>
   <property name="windowTitle">
-   <string>MainWindow</string>
+   <string>Login Page</string>
+  </property>
+  <property name="windowIcon">
+   <iconset>
+    <normaloff>1-6e875601.ico</normaloff>1-6e875601.ico</iconset>
   </property>
   <widget class="QWidget" name="centralwidget">
    <widget class="QLabel" name="label">

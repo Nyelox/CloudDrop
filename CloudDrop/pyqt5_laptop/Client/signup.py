@@ -31,12 +31,19 @@ class WorkerThread(threading.Thread):
         time.sleep(1)
 
         try:
-            message = Database_connection.handle_signup(username, password)
+            response = Database_connection.handle_signup(username, password)
 
-            if message == "Sign Up successful":
-                self.signals.success.emit(message)
+            # Check if response is a dict (new format)
+            if isinstance(response, dict):
+                if response.get("status") == "success":
+                    self.signals.success.emit(response.get("message", "Sign Up successful"))
+                else:
+                    self.signals.error.emit(response.get("message", "Sign Up failed"))
+            # Fallback for string (old format)
+            elif response == "Sign Up successful":
+                self.signals.success.emit(response)
             else:
-                self.signals.error.emit(message)
+                self.signals.error.emit(response)
 
         except Exception as e:
             self.signals.error.emit(f"Error: {str(e)}")

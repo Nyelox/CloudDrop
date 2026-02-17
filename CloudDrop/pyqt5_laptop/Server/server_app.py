@@ -41,6 +41,8 @@ app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = MAX_FILE_MB * 1024 * 1024
 
 
+
+
 def get_db():
     return pymysql.connect(**DB_CONFIG)
 
@@ -48,6 +50,8 @@ def get_db():
 def init_db():
     con = get_db()
     cur = con.cursor()
+    
+    # Shared files table
     cur.execute("""
         CREATE TABLE IF NOT EXISTS shared_files (
             id INT AUTO_INCREMENT PRIMARY KEY,
@@ -60,12 +64,62 @@ def init_db():
             uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
     """)
+
+    # History table
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS history (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            username VARCHAR(255) NOT NULL,
+            action VARCHAR(255) NOT NULL,
+            details TEXT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+    """)
+
+    # System Settings table
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS system_settings (
+            setting_key VARCHAR(50) PRIMARY KEY,
+            setting_value VARCHAR(255)
+        );
+    """)
+    
+    # Insert default global max downloads if not exists
+    cur.execute("SELECT setting_value FROM system_settings WHERE setting_key='global_max_downloads'")
+    if not cur.fetchone():
+        cur.execute("INSERT INTO system_settings (setting_key, setting_value) VALUES ('global_max_downloads', '5')")
+
+    # Update 'data' table with new columns if they don't exist
+    def add_column(table, col, defi):
+        try:
+            cur.execute(f"ALTER TABLE {table} ADD COLUMN {col} {defi}")
+        except Exception:
+            pass # Column likely exists
+
+    add_column("data", "is_blocked", "BOOLEAN DEFAULT 0")
+    add_column("data", "is_admin", "BOOLEAN DEFAULT 0")
+    
+    # Add download_count to shared_files
+    add_column("shared_files", "download_count", "INT DEFAULT 0")
+
     con.commit()
     con.close()
 
 
-def cleanup_expired_files():
+def log_history(username, action, details=""):
+    try:
+        con = get_db()
+        cur = con.cursor()
+        cur.execute("INSERT INTO history (username, action, details) VALUES (%s, %s, %s)", 
+                    (username, action, details))
+        con.commit()
+        con.close()
+    except Exception as e:
+        print(f"Failed to log history: {e}")
 
+
+def cleanup_expired_files():
+    # ... existing cleanup code ...
     con = get_db()
     cur = con.cursor()
 
@@ -75,8 +129,6 @@ def cleanup_expired_files():
     for row in expired:
         # Remove from Supabase
         try:
-            # We stored the full relative path in row["path"], e.g. "uploaded_files/xyz_name"
-            # Supabase remove takes a list of paths
             supabase.storage.from_(SUPABASE_BUCKET).remove([row["path"]])
         except Exception as e:
             print(f"Error removing file from Supabase: {e}")
@@ -108,7 +160,12 @@ def api_signup():
         return jsonify({"status": "Missing fields"}), 400
 
     res = handle_signup(username, password)
-    return jsonify({"status": res})
+    # res is now a dict
+    if res.get("status") == "success":
+        log_history(username, "SIGNUP", "User created account")
+        return jsonify({"status": res["message"]})
+    
+    return jsonify({"status": res.get("message", "Error")})
 
 
 @app.route("/login", methods=["POST"])
@@ -120,12 +177,20 @@ def api_login():
         return jsonify({"status": "Missing fields"}), 400
 
     res = handle_login(username, password)
-    return jsonify({"status": res})
+    
+    if res.get("status") == "success":
+        log_history(username, "LOGIN", "User logged in")
+        return jsonify({
+            "status": res["message"], 
+            "is_admin": res.get("is_admin", False),
+            "is_blocked": res.get("is_blocked", False)
+        })
+    
+    return jsonify({"status": res.get("message", "Login failed")})
 
 
 @app.route("/upload_file", methods=["POST"])
 def upload_file():
-
     data = request.json
     sender = data.get("sender", "").strip()
     receiver = data.get("receiver", "").strip()
@@ -136,12 +201,10 @@ def upload_file():
     if not all([sender, receiver, filename, filedata_b64]):
         return jsonify({"status": "Missing fields"}), 400
 
-    # שומר שם קובץ בטוח
     safe_name = secure_filename(filename)
     if not safe_name:
         return jsonify({"status": "Bad filename"}), 400
 
-    # מפענח
     try:
         raw_bytes = base64.b64decode(filedata_b64)
     except Exception:
@@ -149,11 +212,8 @@ def upload_file():
 
     file_uid = uuid.uuid4().hex
     server_filename = f"{file_uid}_{safe_name}"
-    
-    # Store directly in the bucket root (no "uploaded_files/" prefix)
     path = server_filename
 
-    # Upload to Supabase
     try:
         supabase.storage.from_(SUPABASE_BUCKET).upload(path, raw_bytes, {"content-type": "application/octet-stream"})
     except Exception as e:
@@ -164,19 +224,21 @@ def upload_file():
 
     con = get_db()
     cur = con.cursor()
+    # Explicitly set download_count to 0
     cur.execute("""
-        INSERT INTO shared_files(file_uid, sender, receiver, filename, path, expires_at)
-        VALUES (%s, %s, %s, %s, %s, %s)
+        INSERT INTO shared_files(file_uid, sender, receiver, filename, path, expires_at, download_count)
+        VALUES (%s, %s, %s, %s, %s, %s, 0)
     """, (file_uid, sender, receiver, safe_name, path, expires_at))
     con.commit()
     con.close()
+
+    log_history(sender, "UPLOAD", f"Sent file '{safe_name}' to {receiver}")
 
     return jsonify({"status": "OK"})
 
 
 @app.route("/incoming_files", methods=["POST"])
 def incoming_files():
-
     data = request.json
     receiver = data.get("receiver", "").strip()
     if not receiver:
@@ -184,6 +246,8 @@ def incoming_files():
 
     con = get_db()
     cur = con.cursor()
+    # We can also fetch max_downloads setting to show user how many left, ideally
+    # But for now just basic list
     cur.execute("""
         SELECT id, sender, filename, uploaded_at, expires_at
         FROM shared_files
@@ -200,7 +264,6 @@ def incoming_files():
 def get_file():
     """
     JSON: { receiver, file_id }
-    מחזיר filedata(base64) אם בתוקף.
     """
     data = request.json
     receiver = data.get("receiver", "").strip()
@@ -211,27 +274,47 @@ def get_file():
 
     con = get_db()
     cur = con.cursor()
+    
+    # 1. Get Global Limit
+    cur.execute("SELECT setting_value FROM system_settings WHERE setting_key='global_max_downloads'")
+    setting = cur.fetchone()
+    max_downloads = int(setting["setting_value"]) if setting else 5 
+
+    # 2. Get File Info
     cur.execute("""
-        SELECT filename, path, expires_at
+        SELECT filename, path, expires_at, download_count
         FROM shared_files
         WHERE id=%s AND receiver=%s
     """, (file_id, receiver))
     row = cur.fetchone()
-    con.close()
 
     if not row:
+        con.close()
         return jsonify({"status": "Not found"}), 404
 
     if datetime.now() > row["expires_at"]:
+        con.close()
         return jsonify({"status": "File expired"}), 403
+    
+    # 3. Check Limit
+    if row["download_count"] >= max_downloads:
+        con.close()
+        return jsonify({"status": "Download limit reached"}), 403
+
+    # 4. Increment Count
+    # We optimistically increment. If download fails later, we can decide to decrement or not, 
+    # but usually "attempt" counts or successful serve counts. 
+    # Let's count it now to prevent race conditions easily.
+    cur.execute("UPDATE shared_files SET download_count = download_count + 1 WHERE id=%s", (file_id,))
+    con.commit() # Commit update
+    con.close()
 
     # Download from Supabase
     try:
         response = supabase.storage.from_(SUPABASE_BUCKET).download(row["path"])
-        raw = response # response is bytes
+        raw = response
     except Exception as e:
         print(f"Supabase download error: {e}")
-        # Fallback to local if not found (legacy support)
         if os.path.exists(row["path"]):
             with open(row["path"], "rb") as f:
                 raw = f.read()
@@ -239,6 +322,9 @@ def get_file():
             return jsonify({"status": "File not found"}), 404
 
     encoded = base64.b64encode(raw).decode()
+    
+    log_history(receiver, "DOWNLOAD", f"Downloaded file '{row['filename']}' ({row['download_count']+1}/{max_downloads})")
+
     return jsonify({"status": "OK", "filename": row["filename"], "filedata": encoded})
 
 
@@ -274,6 +360,119 @@ def online_users_list():
     ]
     return jsonify({"status": "OK", "online": active})
 
+# --- Admin Endpoints ---
+
+def is_admin(username):
+    con = get_db()
+    cur = con.cursor()
+    cur.execute("SELECT is_admin FROM data WHERE username=%s", (username,))
+    res = cur.fetchone()
+    con.close()
+    return res and res["is_admin"]
+
+@app.route("/admin/users", methods=["POST"])
+def admin_users():
+    data = request.json
+    admin_user = data.get("admin_user", "")
+    
+    if not is_admin(admin_user):
+        return jsonify({"status": "Forbidden"}), 403
+
+    con = get_db()
+    cur = con.cursor()
+    cur.execute("SELECT username, is_blocked, is_admin FROM data ORDER BY username")
+    rows = cur.fetchall()
+    con.close()
+    
+    for r in rows:
+        r["is_blocked"] = bool(r["is_blocked"])
+        r["is_admin"] = bool(r["is_admin"])
+
+    return jsonify({"status": "OK", "users": rows})
+
+@app.route("/admin/block_user", methods=["POST"])
+def admin_block_user():
+    data = request.json
+    admin_user = data.get("admin_user", "")
+    target_user = data.get("target_user", "")
+    block = data.get("block", False)
+
+    if not is_admin(admin_user):
+        return jsonify({"status": "Forbidden"}), 403
+    
+    if admin_user == target_user:
+        return jsonify({"status": "Cannot block self"}), 400
+
+    con = get_db()
+    cur = con.cursor()
+    cur.execute("UPDATE data SET is_blocked=%s WHERE username=%s", (1 if block else 0, target_user))
+    con.commit()
+    con.close()
+    
+    action = "BLOCKED" if block else "UNBLOCKED"
+    log_history(admin_user, "ADMIN_ACTION", f"{action} user {target_user}")
+
+    return jsonify({"status": "OK"})
+
+@app.route("/admin/history", methods=["POST"])
+def admin_history():
+    data = request.json
+    admin_user = data.get("admin_user", "")
+    target_user = data.get("target_user", None)
+
+    if not is_admin(admin_user):
+        return jsonify({"status": "Forbidden"}), 403
+
+    con = get_db()
+    cur = con.cursor()
+    
+    if target_user:
+        cur.execute("SELECT * FROM history WHERE username=%s ORDER BY timestamp DESC", (target_user,))
+    else:
+        cur.execute("SELECT * FROM history ORDER BY timestamp DESC")
+        
+    rows = cur.fetchall()
+    con.close()
+
+    return jsonify({"status": "OK", "history": rows})
+
+@app.route("/admin/get_settings", methods=["POST"])
+def admin_get_settings():
+    data = request.json
+    admin_user = data.get("admin_user", "")
+    if not is_admin(admin_user):
+        return jsonify({"status": "Forbidden"}), 403
+        
+    con = get_db()
+    cur = con.cursor()
+    cur.execute("SELECT setting_value FROM system_settings WHERE setting_key='global_max_downloads'")
+    row = cur.fetchone()
+    con.close()
+    
+    val = int(row["setting_value"]) if row else 5
+    return jsonify({"status": "OK", "max_downloads": val})
+
+@app.route("/admin/update_settings", methods=["POST"])
+def admin_update_settings():
+    data = request.json
+    admin_user = data.get("admin_user", "")
+    max_downloads = data.get("max_downloads")
+    
+    if not is_admin(admin_user):
+        return jsonify({"status": "Forbidden"}), 403
+        
+    if max_downloads is None or int(max_downloads) < 0:
+        return jsonify({"status": "Invalid value"}), 400
+
+    con = get_db()
+    cur = con.cursor()
+    # Upsert logic
+    cur.execute("REPLACE INTO system_settings (setting_key, setting_value) VALUES ('global_max_downloads', %s)", (str(max_downloads),))
+    con.commit()
+    con.close()
+    
+    log_history(admin_user, "ADMIN_SETTINGS", f"Updated max downloads to {max_downloads}")
+    return jsonify({"status": "OK"})
 
 if __name__ == "__main__":
     init_db()
