@@ -1,0 +1,1 @@
+C:\Users\NOAMGR\AppData\Local\Programs\Python\Python311\Scripts\pyuic5 -x login.ui -o login.py
