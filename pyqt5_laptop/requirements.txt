@@ -1,0 +1,8 @@
+PyQt5==5.15.9
+PyQt5-sip==12.12.1
+requests==2.31.0
+Flask==2.3.3
+Werkzeug==2.3.7
+PyMySQL==1.1.0
+bcrypt==4.1.2
+supabase
