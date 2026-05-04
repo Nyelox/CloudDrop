@@ -34,14 +34,12 @@ class AdminWindow(QMainWindow):
         self.init_history_tab()
         self.tabs.addTab(self.history_tab, "User History")
 
-        # Settings Tab
-        self.settings_tab = QWidget()
-        self.init_settings_tab()
-        self.tabs.addTab(self.settings_tab, "System Settings")
+
 
         self.load_users()
         self.load_history()
-        self.load_settings()
+        self.load_users()
+        self.load_history()
 
     def init_users_tab(self):
         layout = QVBoxLayout(self.users_tab)
@@ -93,22 +91,7 @@ class AdminWindow(QMainWindow):
         self.history_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         layout.addWidget(self.history_table)
 
-    def init_settings_tab(self):
-        from PyQt5.QtWidgets import QSpinBox, QFormLayout
-        layout = QFormLayout(self.settings_tab)
-        
-        self.spin_max_downloads = QSpinBox()
-        self.spin_max_downloads.setRange(0, 1000)
-        self.spin_max_downloads.setValue(5)
-        
-        layout.addRow(QLabel("Global Max Downloads per File:"), self.spin_max_downloads)
-        
-        self.btn_save_settings = QPushButton("Save Settings")
-        self.btn_save_settings.clicked.connect(self.save_settings)
-        layout.addRow(self.btn_save_settings)
-        
-        self.lbl_settings_status = QLabel("")
-        layout.addRow(self.lbl_settings_status)
+
 
     def load_users(self):
         try:
@@ -179,32 +162,7 @@ class AdminWindow(QMainWindow):
         except Exception as e:
             print(f"History load error: {e}")
 
-    def load_settings(self):
-        try:
-            url = f"{self.server_url}/admin/get_settings"
-            resp = requests.post(url, json={"admin_user": self.current_user})
-            data = resp.json()
-            if data.get("status") == "OK":
-                self.spin_max_downloads.setValue(int(data.get("max_downloads", 5)))
-                self.lbl_settings_status.setText("Settings loaded.")
-            else:
-                self.lbl_settings_status.setText(f"Error: {data.get('status')}")
-        except Exception as e:
-             self.lbl_settings_status.setText(f"Connection Error: {e}")
-             
-    def save_settings(self):
-        val = self.spin_max_downloads.value()
-        try:
-            url = f"{self.server_url}/admin/update_settings"
-            resp = requests.post(url, json={"admin_user": self.current_user, "max_downloads": val})
-            data = resp.json()
-            if data.get("status") == "OK":
-                QMessageBox.information(self, "Success", "Settings saved successfully.")
-                self.lbl_settings_status.setText("Settings saved.")
-            else:
-                QMessageBox.warning(self, "Error", data.get("status"))
-        except Exception as e:
-            QMessageBox.critical(self, "Error", str(e))
+
 
     def block_user(self):
         self._set_block_status(True)

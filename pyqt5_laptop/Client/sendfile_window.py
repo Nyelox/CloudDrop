@@ -48,8 +48,12 @@ class SendFileWindow(QMainWindow):
         self.users_refresh_timer.timeout.connect(self.refresh_users_online)
         self.users_refresh_timer.start(7000)
 
-        # טען קבצים נכנסים בהתחלה
+        self.users_refresh_timer.timeout.connect(self.refresh_users_online)
+        self.users_refresh_timer.start(7000)
+
+        # טען קבצים נכנסים ומשתמשים אונליין בהתחלה
         self.refresh_incoming()
+        self.refresh_users_online()
 
     #
     # בחירת קובץ
@@ -80,7 +84,8 @@ class SendFileWindow(QMainWindow):
             "receiver": receiver,
             "filename": filename,
             "filedata": encoded,
-            "minutes": minutes
+            "minutes": minutes,
+            "message": self.input_file_message.text().strip()
         }
 
         r = requests.post(f"{self.server_url}/upload_file", json=payload)
@@ -88,7 +93,9 @@ class SendFileWindow(QMainWindow):
 
         if data["status"] == "OK":
             QMessageBox.information(self, "Success", "The file was sent successfully")
-            self.lbl_file.setText("No ")
+            
+            self.lbl_file.setText("No file selected")
+            self.input_file_message.clear()
             self.btn_send.setEnabled(False)
         else:
             QMessageBox.warning(self, "Error", str(data))
@@ -118,7 +125,8 @@ class SendFileWindow(QMainWindow):
         self.incoming_raw = data["files"]
 
         for f in self.incoming_raw:
-            txt = f"{f['filename']} | From: {f['sender']} | Expires: {f['expires_at']}"
+            msg_part = f" | Msg: {f['message']}" if f.get('message') else ""
+            txt = f"{f['filename']} | From: {f['sender']} | Expires: {f['expires_at']}{msg_part}"
             item = QListWidgetItem(txt)
             item.setData(Qt.UserRole, f["id"])
             self.list_incoming.addItem(item)
@@ -188,3 +196,4 @@ class SendFileWindow(QMainWindow):
             with open(save_path, "wb") as f:
                 f.write(raw)
             QMessageBox.information(self, "Sucess", "The file has been saved successfully")
+

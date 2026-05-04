@@ -99,8 +99,9 @@ def init_db():
     add_column("data", "is_blocked", "BOOLEAN DEFAULT 0")
     add_column("data", "is_admin", "BOOLEAN DEFAULT 0")
     
-    # Add download_count to shared_files
-    add_column("shared_files", "download_count", "INT DEFAULT 0")
+
+    add_column("shared_files", "message", "TEXT")
+    add_column("shared_files", "message", "TEXT")
 
     con.commit()
     con.close()
@@ -198,7 +199,9 @@ def upload_file():
     filedata_b64 = data.get("filedata", "")
     minutes = int(data.get("minutes", 10))
 
-    if not all([sender, receiver, filename, filedata_b64]):
+    message = data.get("message", "").strip()
+
+    if not all([sender, receiver, filename]) or "filedata" not in data:
         return jsonify({"status": "Missing fields"}), 400
 
     safe_name = secure_filename(filename)
@@ -224,11 +227,11 @@ def upload_file():
 
     con = get_db()
     cur = con.cursor()
-    # Explicitly set download_count to 0
+    # Explicitly save message
     cur.execute("""
-        INSERT INTO shared_files(file_uid, sender, receiver, filename, path, expires_at, download_count)
-        VALUES (%s, %s, %s, %s, %s, %s, 0)
-    """, (file_uid, sender, receiver, safe_name, path, expires_at))
+        INSERT INTO shared_files(file_uid, sender, receiver, filename, path, expires_at, message)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+    """, (file_uid, sender, receiver, safe_name, path, expires_at, message))
     con.commit()
     con.close()
 
@@ -249,7 +252,7 @@ def incoming_files():
     # We can also fetch max_downloads setting to show user how many left, ideally
     # But for now just basic list
     cur.execute("""
-        SELECT id, sender, filename, uploaded_at, expires_at
+        SELECT id, sender, filename, uploaded_at, expires_at, message
         FROM shared_files
         WHERE receiver=%s AND expires_at >= NOW()
         ORDER BY uploaded_at DESC
@@ -277,12 +280,9 @@ def get_file():
     
     # 1. Get Global Limit
     cur.execute("SELECT setting_value FROM system_settings WHERE setting_key='global_max_downloads'")
-    setting = cur.fetchone()
-    max_downloads = int(setting["setting_value"]) if setting else 5 
-
     # 2. Get File Info
     cur.execute("""
-        SELECT filename, path, expires_at, download_count
+        SELECT filename, path, expires_at
         FROM shared_files
         WHERE id=%s AND receiver=%s
     """, (file_id, receiver))
@@ -296,17 +296,6 @@ def get_file():
         con.close()
         return jsonify({"status": "File expired"}), 403
     
-    # 3. Check Limit
-    if row["download_count"] >= max_downloads:
-        con.close()
-        return jsonify({"status": "Download limit reached"}), 403
-
-    # 4. Increment Count
-    # We optimistically increment. If download fails later, we can decide to decrement or not, 
-    # but usually "attempt" counts or successful serve counts. 
-    # Let's count it now to prevent race conditions easily.
-    cur.execute("UPDATE shared_files SET download_count = download_count + 1 WHERE id=%s", (file_id,))
-    con.commit() # Commit update
     con.close()
 
     # Download from Supabase
@@ -323,9 +312,12 @@ def get_file():
 
     encoded = base64.b64encode(raw).decode()
     
-    log_history(receiver, "DOWNLOAD", f"Downloaded file '{row['filename']}' ({row['download_count']+1}/{max_downloads})")
+    log_history(receiver, "DOWNLOAD", f"Downloaded file '{row['filename']}'")
 
     return jsonify({"status": "OK", "filename": row["filename"], "filedata": encoded})
+
+
+
 
 
 @app.route("/all_users", methods=["GET"])
@@ -436,43 +428,7 @@ def admin_history():
 
     return jsonify({"status": "OK", "history": rows})
 
-@app.route("/admin/get_settings", methods=["POST"])
-def admin_get_settings():
-    data = request.json
-    admin_user = data.get("admin_user", "")
-    if not is_admin(admin_user):
-        return jsonify({"status": "Forbidden"}), 403
-        
-    con = get_db()
-    cur = con.cursor()
-    cur.execute("SELECT setting_value FROM system_settings WHERE setting_key='global_max_downloads'")
-    row = cur.fetchone()
-    con.close()
-    
-    val = int(row["setting_value"]) if row else 5
-    return jsonify({"status": "OK", "max_downloads": val})
 
-@app.route("/admin/update_settings", methods=["POST"])
-def admin_update_settings():
-    data = request.json
-    admin_user = data.get("admin_user", "")
-    max_downloads = data.get("max_downloads")
-    
-    if not is_admin(admin_user):
-        return jsonify({"status": "Forbidden"}), 403
-        
-    if max_downloads is None or int(max_downloads) < 0:
-        return jsonify({"status": "Invalid value"}), 400
-
-    con = get_db()
-    cur = con.cursor()
-    # Upsert logic
-    cur.execute("REPLACE INTO system_settings (setting_key, setting_value) VALUES ('global_max_downloads', %s)", (str(max_downloads),))
-    con.commit()
-    con.close()
-    
-    log_history(admin_user, "ADMIN_SETTINGS", f"Updated max downloads to {max_downloads}")
-    return jsonify({"status": "OK"})
 
 if __name__ == "__main__":
     init_db()
