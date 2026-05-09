@@ -14,7 +14,7 @@ def handle_login(username, password):
     con = pymysql.connect(
         host='localhost',
         user='root',
-        password='1234',
+        password='Data230308data',
         database='userdata',
     )
     cursor = con.cursor()
@@ -71,7 +71,7 @@ def handle_signup(username, password):
     con = pymysql.connect(
         host='localhost',
         user='root',
-        password='1234',
+        password='Data230308data',
         database='userdata',
     )
     mycursor = con.cursor()

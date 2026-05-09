@@ -11,10 +11,9 @@ from Server.Database_connection import handle_login, handle_signup
 from supabase import create_client, Client
 
 SUPABASE_URL = "https://trgaimvzokzrtapgkxsd.supabase.co"
-# TODO: REPLACE WITH SERVICE ROLE KEY (from Project Settings -> API -> service_role)
-# The 'anon' key will NOT work if you disable Public Access.
+# מפתח הגישה ל-Supabase Storage
 SUPABASE_SERVICE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRyZ2FpbXZ6b2t6cnRhcGdreHNkIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2NTQ3MDQ2NSwiZXhwIjoyMDgxMDQ2NDY1fQ.8VFdJPQEmCsMqnnAUBGYFuG0tUtPzOroSx6hnKEF2og"
-SUPABASE_BUCKET = "Files"
+SUPABASE_BUCKET = "Files" # שם ה-Bucket בשרת
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
@@ -30,28 +29,30 @@ ONLINE_TIMEOUT_SECONDS = 20
 DB_CONFIG = dict(
     host='localhost',
     user='root',
-    password='1234',
+    password='Data230308data',
     database='userdata',
     charset='utf8mb4',
     cursorclass=pymysql.cursors.DictCursor
 )
 
 app = Flask(__name__)
-# Max content length applies to the request body, still relevant for upload limit
+# הגבלת גודל הקובץ המקסימלי להעלאה (50MB)
 app.config["MAX_CONTENT_LENGTH"] = MAX_FILE_MB * 1024 * 1024
 
 
 
 
+# התחברות לבסיס הנתונים MySQL
 def get_db():
     return pymysql.connect(**DB_CONFIG)
 
 
+# יצירת טבלאות בסיס הנתונים במידה והן לא קיימות
 def init_db():
     con = get_db()
     cur = con.cursor()
     
-    # Shared files table
+    # טבלת קבצים משותפים
     cur.execute("""
         CREATE TABLE IF NOT EXISTS shared_files (
             id INT AUTO_INCREMENT PRIMARY KEY,
@@ -61,11 +62,22 @@ def init_db():
             filename VARCHAR(255) NOT NULL,
             path VARCHAR(500) NOT NULL,
             expires_at DATETIME NOT NULL,
+            max_downloads INT DEFAULT 1,
+            download_count INT DEFAULT 0,
             uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
     """)
 
-    # History table
+    # בדיקה והוספת עמודות במידה וצריך (עבור עדכוני גרסה)
+    cur.execute("SHOW COLUMNS FROM shared_files LIKE 'max_downloads'")
+    if not cur.fetchone():
+        cur.execute("ALTER TABLE shared_files ADD COLUMN max_downloads INT DEFAULT 1")
+    
+    cur.execute("SHOW COLUMNS FROM shared_files LIKE 'download_count'")
+    if not cur.fetchone():
+        cur.execute("ALTER TABLE shared_files ADD COLUMN download_count INT DEFAULT 0")
+
+    # טבלת היסטוריית פעולות
     cur.execute("""
         CREATE TABLE IF NOT EXISTS history (
             id INT AUTO_INCREMENT PRIMARY KEY,
@@ -76,7 +88,7 @@ def init_db():
         );
     """)
 
-    # System Settings table
+    # טבלת הגדרות מערכת
     cur.execute("""
         CREATE TABLE IF NOT EXISTS system_settings (
             setting_key VARCHAR(50) PRIMARY KEY,
@@ -84,12 +96,12 @@ def init_db():
         );
     """)
     
-    # Insert default global max downloads if not exists
+    # הכנסת הגדרת ברירת מחדל להורדות אם לא קיימת
     cur.execute("SELECT setting_value FROM system_settings WHERE setting_key='global_max_downloads'")
     if not cur.fetchone():
         cur.execute("INSERT INTO system_settings (setting_key, setting_value) VALUES ('global_max_downloads', '5')")
 
-    # Print jobs table
+    # טבלת עבודות הדפסה
     cur.execute("""
         CREATE TABLE IF NOT EXISTS print_jobs (
             id            INT AUTO_INCREMENT PRIMARY KEY,
@@ -103,22 +115,22 @@ def init_db():
         );
     """)
 
-    # Update 'data' table with new columns if they don't exist
+    # פונקציית עזר להוספת עמודות לטבלאות קיימות
     def add_column(table, col, defi):
         try:
             cur.execute(f"ALTER TABLE {table} ADD COLUMN {col} {defi}")
         except Exception:
-            pass # Column likely exists
+            pass # העמודה כנראה כבר קיימת
 
     add_column("data", "is_blocked", "BOOLEAN DEFAULT 0")
     add_column("data", "is_admin", "BOOLEAN DEFAULT 0")
-
     add_column("shared_files", "message", "TEXT")
 
     con.commit()
     con.close()
 
 
+# רישום פעולה להיסטוריית המערכת
 def log_history(username, action, details=""):
     try:
         con = get_db()
@@ -131,8 +143,8 @@ def log_history(username, action, details=""):
         print(f"Failed to log history: {e}")
 
 
+# ניקוי קבצים שפג תוקפם מהשרת ומבסיס הנתונים
 def cleanup_expired_files():
-    # ... existing cleanup code ...
     con = get_db()
     cur = con.cursor()
 
@@ -140,13 +152,13 @@ def cleanup_expired_files():
     expired = cur.fetchall()
 
     for row in expired:
-        # Remove from Supabase
+        # הסרה מ-Supabase Storage
         try:
             supabase.storage.from_(SUPABASE_BUCKET).remove([row["path"]])
         except Exception as e:
             print(f"Error removing file from Supabase: {e}")
 
-        # Also try local cleanup in case mixed usage or migration
+        # ניסיון ניקוי מקומי (למקרה של קבצים ישנים)
         try:
             if os.path.exists(row["path"]):
                 os.remove(row["path"])
@@ -159,11 +171,13 @@ def cleanup_expired_files():
     con.close()
 
 
+# ביצוע ניקוי קבצים לפני כל בקשה לשרת
 @app.before_request
 def before_any_request():
     cleanup_expired_files()
 
 
+# נקודת קצה להרשמת משתמש חדש
 @app.route("/signup", methods=["POST"])
 def api_signup():
     data = request.json
@@ -181,6 +195,7 @@ def api_signup():
     return jsonify({"status": res.get("message", "Error")})
 
 
+# נקודת קצה להתחברות משתמש
 @app.route("/login", methods=["POST"])
 def api_login():
     data = request.json
@@ -202,18 +217,29 @@ def api_login():
     return jsonify({"status": res.get("message", "Login failed")})
 
 
+# העלאת קובץ חדש ושיתופו עם משתמשים אחרים
 @app.route("/upload_file", methods=["POST"])
 def upload_file():
     data = request.json
     sender = data.get("sender", "").strip()
-    receiver = data.get("receiver", "").strip()
+    
+    # תמיכה גם בשם בודד וגם ברשימת נמענים
+    receivers = data.get("receivers", [])
+    if not isinstance(receivers, list):
+        receivers = [str(receivers).strip()]
+    
+    single_receiver = data.get("receiver", "").strip()
+    if single_receiver and single_receiver not in receivers:
+        receivers.append(single_receiver)
+
     filename = data.get("filename", "").strip()
     filedata_b64 = data.get("filedata", "")
     minutes = int(data.get("minutes", 10))
+    max_downloads = int(data.get("max_downloads", 1))
 
     message = data.get("message", "").strip()
 
-    if not all([sender, receiver, filename]) or "filedata" not in data:
+    if not all([sender, receivers, filename]) or "filedata" not in data:
         return jsonify({"status": "Missing fields"}), 400
 
     safe_name = secure_filename(filename)
@@ -229,29 +255,49 @@ def upload_file():
     server_filename = f"{file_uid}_{safe_name}"
     path = server_filename
 
+    con = get_db()
+    cur = con.cursor()
+    
+    # Validate that all receivers exist
+    invalid_receivers = []
+    for rcv in receivers:
+        rcv = rcv.strip()
+        if not rcv: continue
+        cur.execute("SELECT username FROM data WHERE username=%s", (rcv,))
+        if not cur.fetchone():
+            invalid_receivers.append(rcv)
+            
+    if invalid_receivers:
+        con.close()
+        return jsonify({"status": f"User(s) not found: {', '.join(invalid_receivers)}"}), 404
+
+    # Proceed with Supabase upload
     try:
         supabase.storage.from_(SUPABASE_BUCKET).upload(path, raw_bytes, {"content-type": "application/octet-stream"})
     except Exception as e:
+        con.close()
         print(f"Supabase upload error: {e}")
         return jsonify({"status": "Storage Error"}), 500
 
     expires_at = datetime.now() + timedelta(minutes=minutes)
+    
+    for rcv in receivers:
+        rcv = rcv.strip()
+        if not rcv:
+            continue
+        cur.execute("""
+            INSERT INTO shared_files(file_uid, sender, receiver, filename, path, expires_at, max_downloads, download_count, message)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, 0, %s)
+        """, (file_uid, sender, rcv, safe_name, path, expires_at, max_downloads, message))
+        log_history(sender, "UPLOAD", f"Sent file '{safe_name}' to {rcv} (Max downloads: {max_downloads})")
 
-    con = get_db()
-    cur = con.cursor()
-    # Explicitly save message
-    cur.execute("""
-        INSERT INTO shared_files(file_uid, sender, receiver, filename, path, expires_at, message)
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
-    """, (file_uid, sender, receiver, safe_name, path, expires_at, message))
     con.commit()
     con.close()
-
-    log_history(sender, "UPLOAD", f"Sent file '{safe_name}' to {receiver}")
 
     return jsonify({"status": "OK"})
 
 
+# שליפת רשימת הקבצים שמחכים למשתמש מסוים
 @app.route("/incoming_files", methods=["POST"])
 def incoming_files():
     data = request.json
@@ -261,12 +307,11 @@ def incoming_files():
 
     con = get_db()
     cur = con.cursor()
-    # We can also fetch max_downloads setting to show user how many left, ideally
-    # But for now just basic list
+    # שליפת קבצים שעדיין לא פג תוקפם ולא הגיעו למקסימום הורדות
     cur.execute("""
-        SELECT id, sender, filename, uploaded_at, expires_at, message
+        SELECT id, sender, filename, uploaded_at, expires_at, max_downloads, download_count, message
         FROM shared_files
-        WHERE receiver=%s AND expires_at >= NOW()
+        WHERE receiver=%s AND expires_at >= NOW() AND download_count < max_downloads
         ORDER BY uploaded_at DESC
     """, (receiver,))
     rows = cur.fetchall()
@@ -275,6 +320,7 @@ def incoming_files():
     return jsonify({"status": "OK", "files": rows})
 
 
+# הורדת תוכן קובץ (Base64) ועדכון מונה הורדות
 @app.route("/get_file", methods=["POST"])
 def get_file():
     """
@@ -290,9 +336,9 @@ def get_file():
     con = get_db()
     cur = con.cursor()
     
-    # 1. Get Global Limit
+    # 1. שליפת הגבלת ההורדות הגלובלית
     cur.execute("SELECT setting_value FROM system_settings WHERE setting_key='global_max_downloads'")
-    # 2. Get File Info
+    # 2. שליפת פרטי הקובץ
     cur.execute("""
         SELECT filename, path, expires_at
         FROM shared_files
@@ -307,10 +353,21 @@ def get_file():
     if datetime.now() > row["expires_at"]:
         con.close()
         return jsonify({"status": "File expired"}), 403
+
+    cur.execute("UPDATE shared_files SET download_count = download_count + 1 WHERE id=%s", (file_id,))
+    con.commit()
+
+    # 4. בדיקה האם הגענו למקסימום הורדות
+    cur.execute("SELECT download_count, max_downloads, path FROM shared_files WHERE id=%s", (file_id,))
+    limit_check = cur.fetchone()
     
+    should_delete = False
+    if limit_check and limit_check["download_count"] >= limit_check["max_downloads"]:
+        should_delete = True
+
     con.close()
 
-    # Download from Supabase
+    # הורדת הקובץ מ-Supabase
     try:
         response = supabase.storage.from_(SUPABASE_BUCKET).download(row["path"])
         raw = response
@@ -322,14 +379,43 @@ def get_file():
         else:
             return jsonify({"status": "File not found"}), 404
 
+    # 5. ניקוי סופי אם עברנו את הגבלת ההורדות
+    if should_delete:
+        # מחיקת הרשומה הספציפית מהטבלה
+        try:
+            _delete_file_internal(file_id)
+        except:
+            pass
+
     encoded = base64.b64encode(raw).decode()
     
-    log_history(receiver, "DOWNLOAD", f"Downloaded file '{row['filename']}'")
+    log_history(receiver, "DOWNLOAD", f"Downloaded file '{row['filename']}' ({limit_check['download_count']}/{limit_check['max_downloads']})")
 
     return jsonify({"status": "OK", "filename": row["filename"], "filedata": encoded})
 
+# מחיקת קובץ מהשרת ומבסיס הנתונים באופן פנימי
+def _delete_file_internal(file_id):
+    con = get_db()
+    cur = con.cursor()
+    cur.execute("SELECT path FROM shared_files WHERE id=%s", (file_id,))
+    row = cur.fetchone()
+    if row:
+        path = row["path"]
+        # מחיקה מבסיס הנתונים
+        cur.execute("DELETE FROM shared_files WHERE id=%s", (file_id,))
+        # בדיקה האם יש קבצים אחרים שמשתמשים באותו נתיב לפני מחיקה מהאחסון
+        cur.execute("SELECT COUNT(*) as count FROM shared_files WHERE path=%s", (path,))
+        if cur.fetchone()["count"] == 0:
+            try:
+                supabase.storage.from_(SUPABASE_BUCKET).remove([path])
+            except:
+                pass
+    con.commit()
+    con.close()
 
 
+
+# שליפת כל הקבצים ששותפו במערכת (עבור המפעיל/אדמין)
 @app.route("/all_sent_files", methods=["GET"])
 def all_sent_files():
     """
@@ -339,14 +425,14 @@ def all_sent_files():
     con = get_db()
     cur = con.cursor()
     cur.execute("""
-        SELECT id, sender, receiver, filename, path, uploaded_at, expires_at, message
+        SELECT id, sender, receiver, filename, path, uploaded_at, expires_at, max_downloads, download_count, message
         FROM shared_files
         ORDER BY uploaded_at DESC
     """)
     rows = cur.fetchall()
     con.close()
 
-    # Convert datetime objects to strings for JSON serialisation
+    # המרת תאריכים לטקסט עבור פורמט JSON
     for r in rows:
         if r.get("uploaded_at"):
             r["uploaded_at"] = str(r["uploaded_at"])
@@ -356,6 +442,7 @@ def all_sent_files():
     return jsonify({"status": "OK", "files": rows})
 
 
+# בקשת קובץ להדפסה ויצירת "עבודת הדפסה" חדשה
 @app.route("/request_print", methods=["POST"])
 def request_print():
     """
@@ -387,7 +474,7 @@ def request_print():
     ext = os.path.splitext(filename)[1].lower().lstrip(".")
     print_allowed = ext in ("pdf", "docx")
 
-    # Download from Supabase
+    # הורדה מ-Supabase
     try:
         raw = supabase.storage.from_(SUPABASE_BUCKET).download(row["path"])
     except Exception as e:
@@ -395,7 +482,7 @@ def request_print():
         print(f"Supabase download error: {e}")
         return jsonify({"status": "Storage error"}), 500
 
-    # Insert pending print job
+    # הכנסת עבודת הדפסה במצב ממתין (Pending)
     cur.execute("""
         INSERT INTO print_jobs (file_id, sender, filename, file_type, print_allowed, print_status)
         VALUES (%s, %s, %s, %s, %s, 'pending')
@@ -416,6 +503,7 @@ def request_print():
     })
 
 
+# עדכון סטטוס הדפסה (ממתין -> הודפס)
 @app.route("/update_print_status", methods=["POST"])
 def update_print_status():
     """
@@ -437,6 +525,7 @@ def update_print_status():
     return jsonify({"status": "OK"})
 
 
+# שליפת רשימת כל שמות המשתמשים במערכת
 @app.route("/all_users", methods=["GET"])
 def all_users():
     con = get_db()
@@ -449,6 +538,7 @@ def all_users():
     return jsonify({"status": "OK", "users": users})
 
 
+# עדכון נוכחות המשתמש כ-Online
 @app.route("/user_online", methods=["POST"])
 def user_online():
     data = request.json
@@ -460,6 +550,7 @@ def user_online():
     return jsonify({"status": "OK"})
 
 
+# שליפת רשימת המשתמשים שנראו לאחרונה
 @app.route("/online_users", methods=["GET"])
 def online_users_list():
     now = datetime.now()
@@ -471,6 +562,7 @@ def online_users_list():
 
 # --- Admin Endpoints ---
 
+# בדיקה האם המשתמש הוא מנהל מערכת (Admin)
 def is_admin(username):
     con = get_db()
     cur = con.cursor()
@@ -479,6 +571,7 @@ def is_admin(username):
     con.close()
     return res and res["is_admin"]
 
+# ניהול משתמשים - שליפת כל המשתמשים עם סטטוס חסימה (לאדמין)
 @app.route("/admin/users", methods=["POST"])
 def admin_users():
     data = request.json
@@ -499,6 +592,7 @@ def admin_users():
 
     return jsonify({"status": "OK", "users": rows})
 
+# חסימה או שחרור של משתמש מהמערכת (לאדמין)
 @app.route("/admin/block_user", methods=["POST"])
 def admin_block_user():
     data = request.json
@@ -523,6 +617,7 @@ def admin_block_user():
 
     return jsonify({"status": "OK"})
 
+# שליפת היסטוריית הפעולות במערכת (לאדמין)
 @app.route("/admin/history", methods=["POST"])
 def admin_history():
     data = request.json
@@ -548,5 +643,5 @@ def admin_history():
 
 
 if __name__ == "__main__":
-    init_db()
+    init_db() # אתחול בסיס הנתונים
     app.run(host=APP_HOST, port=APP_PORT, debug=True)

@@ -4,19 +4,21 @@ import requests
 
 from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal
 from PyQt5.QtWidgets import (
-    QMainWindow, QFileDialog, QListWidgetItem, QMessageBox
+    QMainWindow, QFileDialog, QListWidgetItem, QMessageBox, QCompleter
 )
 from PyQt5.uic import loadUi
 
 
-# ── Background workers (keep UI thread free) ─────────────────────────────────
+# תהליכי רקע לביצוע פעולות ללא תקיעת הממשק
 
+# מעדכן את השרת שהמשתמש עדיין מחובר (Online)
 class HeartbeatThread(QThread):
     def __init__(self, server_url, username):
         super().__init__()
         self.server_url = server_url
         self.username   = username
 
+    # הרצת תהליך עדכון הנוכחות מול השרת
     def run(self):
         try:
             requests.post(
@@ -28,14 +30,16 @@ class HeartbeatThread(QThread):
             pass
 
 
+# טוען את רשימת המשתמשים מהשרת
 class UsersRefreshThread(QThread):
-    done = pyqtSignal(list)   # list of (display, username) tuples
+    done = pyqtSignal(list)   # רשימה של שמות משתמשים (תצוגה ושם פנימי)
 
     def __init__(self, server_url, current_user):
         super().__init__()
         self.server_url   = server_url
         self.current_user = current_user
 
+    # משיכת רשימת כל המשתמשים ובדיקה מי מהם מחובר כרגע
     def run(self):
         try:
             r_all  = requests.get(f"{self.server_url}/all_users", timeout=5)
@@ -57,6 +61,7 @@ class UsersRefreshThread(QThread):
         self.done.emit(result)
 
 
+# מושך רשימת קבצים שנשלחו למשתמש
 class IncomingFilesThread(QThread):
     done  = pyqtSignal(list)
     error = pyqtSignal(str)
@@ -66,6 +71,7 @@ class IncomingFilesThread(QThread):
         self.server_url = server_url
         self.receiver   = receiver
 
+    # ביצוע הבקשה לשרת לקבלת קבצים שמחכים למשתמש
     def run(self):
         try:
             r    = requests.post(
@@ -82,6 +88,7 @@ class IncomingFilesThread(QThread):
             self.error.emit(str(e))
 
 
+# מעלה קובץ חדש לשרת
 class SendFileThread(QThread):
     success = pyqtSignal()
     error   = pyqtSignal(str)
@@ -91,6 +98,7 @@ class SendFileThread(QThread):
         self.server_url = server_url
         self.payload    = payload
 
+    # ביצוע העלאת הקובץ והנתונים לשרת
     def run(self):
         try:
             r    = requests.post(f"{self.server_url}/upload_file",
@@ -104,6 +112,7 @@ class SendFileThread(QThread):
             self.error.emit(str(e))
 
 
+# מוריד קובץ מהשרת למחשב המקומי
 class DownloadFileThread(QThread):
     done  = pyqtSignal(dict)
     error = pyqtSignal(str)
@@ -114,6 +123,7 @@ class DownloadFileThread(QThread):
         self.receiver   = receiver
         self.file_id    = file_id
 
+    # הורדת תוכן הקובץ מהשרת (בפורמט Base64)
     def run(self):
         try:
             r    = requests.post(
@@ -130,9 +140,9 @@ class DownloadFileThread(QThread):
             self.error.emit(str(e))
 
 
-# ── Main window ───────────────────────────────────────────────────────────────
-
+# החלון המרכזי לשליחת וקבלת קבצים
 class SendFileWindow(QMainWindow):
+    # אתחול החלון, הגדרת כפתורים וטיימרים
     def __init__(self, current_user, users_list, server_url="http://127.0.0.1:5000"):
         super().__init__()
 
@@ -142,36 +152,40 @@ class SendFileWindow(QMainWindow):
         self.current_user     = current_user
         self.server_url       = server_url
         self._all_users_cache = []
-        self._threads: list   = []   # keep refs so threads aren't GC'd
+        self._threads: list   = []   # שמירת הפניות לתהליכים כדי שלא יימחקו מהזיכרון
         self.selected_file_path = None
         self.incoming_raw       = []
 
         self.label_current_user.setText(f"Connected as: {current_user}")
 
-        # buttons
+        # הגדרת כפתורים
         self.btn_select.clicked.connect(self.select_file)
         self.btn_send.clicked.connect(self.send_file)
         self.btn_refresh.clicked.connect(self.refresh_incoming)
         self.btn_download.clicked.connect(self.download_selected)
         self.input_filter.textChanged.connect(self.apply_filter)
-        self.input_filter.textChanged.connect(self.rebuild_receivers)
 
-        # heartbeat timer — fires thread, never blocks UI
+        # השלמה אוטומטית עבור נמענים
+        self.completer = QCompleter([], self)
+        self.completer.setCaseSensitivity(Qt.CaseInsensitive)
+        self.completer.setFilterMode(Qt.MatchContains)
+        self.input_receivers.setCompleter(self.completer)
+
+        # טיימר "אות חיים" - מעדכן נוכחות בלי לתקוע את הממשק
         self.heartbeat_timer = QTimer(self)
         self.heartbeat_timer.timeout.connect(self._send_heartbeat)
         self.heartbeat_timer.start(8000)
 
-        # users refresh timer
+        # טיימר לרענון רשימת המשתמשים המחוברים
         self.users_refresh_timer = QTimer(self)
         self.users_refresh_timer.timeout.connect(self.refresh_users_online)
         self.users_refresh_timer.start(15000)
 
-        # initial load (non-blocking)
+        # טעינה ראשונית של נתונים
         self.refresh_incoming()
         self.refresh_users_online()
 
-    # ── file selection ────────────────────────────────────────────────────────
-
+    # פתיחת דיאלוג לבחירת קובץ מהמחשב
     def select_file(self):
         path, _ = QFileDialog.getOpenFileName(self, "Select File")
         if path:
@@ -179,18 +193,18 @@ class SendFileWindow(QMainWindow):
             self.lbl_file.setText(os.path.basename(path))
             self.btn_send.setEnabled(True)
 
-    # ── send file ─────────────────────────────────────────────────────────────
-
+    # איסוף נתוני השליחה (נמענים, הודעה, הגבלות) ושליחה לשרת
     def send_file(self):
         if not self.selected_file_path:
             QMessageBox.warning(self, "Error", "No file selected")
             return
 
-        receiver = self.combo_receiver.currentData()
-        if not receiver:
-            receiver = self.combo_receiver.currentText().strip()
-        if not receiver:
-            QMessageBox.warning(self, "Error", "Please select a recipient")
+        # קבלת שמות הנמענים מתיבת הטקסט (מופרדים בפסיקים)
+        raw_recipients = self.input_receivers.text().split(",")
+        receivers = [r.strip() for r in raw_recipients if r.strip()]
+
+        if not receivers:
+            QMessageBox.warning(self, "Error", "Write a name to send")
             return
 
         filename = os.path.basename(self.selected_file_path)
@@ -198,12 +212,13 @@ class SendFileWindow(QMainWindow):
             raw = f.read()
 
         payload = {
-            "sender":   self.current_user,
-            "receiver": receiver,
-            "filename": filename,
-            "filedata": base64.b64encode(raw).decode(),
-            "minutes":  int(self.spin_minutes.value()),
-            "message":  self.input_file_message.text().strip(),
+            "sender":    self.current_user,
+            "receivers": receivers,
+            "filename":  filename,
+            "filedata":  base64.b64encode(raw).decode(),
+            "minutes":   int(self.spin_minutes.value()),
+            "max_downloads": int(self.spin_downloads.value()),
+            "message":   self.input_file_message.text().strip(),
         }
 
         self.btn_send.setEnabled(False)
@@ -215,81 +230,84 @@ class SendFileWindow(QMainWindow):
         self._threads.append(t)
         t.start()
 
+    # מנקה את הטופס לאחר שליחה מוצלחת
     def _on_send_success(self):
         self.btn_send.setText("Send")
         self.btn_send.setEnabled(True)
-        QMessageBox.information(self, "Success", "File sent successfully")
+        QMessageBox.information(self, "Success", "File sent successfully to all the users")
         self.lbl_file.setText("No file selected")
         self.input_file_message.clear()
+        self.input_receivers.clear()
         self.selected_file_path = None
 
+    # מציג הודעת שגיאה אם השליחה נכשלה
     def _on_send_error(self, msg):
         self.btn_send.setText("Send")
         self.btn_send.setEnabled(True)
         QMessageBox.warning(self, "Error", msg)
 
-    # ── heartbeat ─────────────────────────────────────────────────────────────
-
+    # שליחת אות חיים לשרת בכל כמה שניות
     def _send_heartbeat(self):
         t = HeartbeatThread(self.server_url, self.current_user)
         self._threads.append(t)
         t.start()
 
-    # ── incoming files ────────────────────────────────────────────────────────
-
+    # רענון רשימת הקבצים שחכו למשתמש
     def refresh_incoming(self):
         t = IncomingFilesThread(self.server_url, self.current_user)
         t.done.connect(self._on_incoming_loaded)
-        t.error.connect(lambda _: None)   # silent fail on background refresh
+        t.error.connect(lambda _: None)   # התעלמות משגיאות ברענון אוטומטי ברקע
         self._threads.append(t)
         t.start()
 
+    # עיבוד רשימת הקבצים הנכנסים והצגתם ברשימה
     def _on_incoming_loaded(self, files):
         self.list_incoming.clear()
         self.incoming_raw = files
         for f in files:
             msg_part = f" | Msg: {f['message']}" if f.get("message") else ""
+            dl_part = f" | Downloads: {f.get('download_count', 0)}/{f.get('max_downloads', 1)}"
             txt  = (f"{f['filename']} | From: {f['sender']} "
-                    f"| Expires: {f['expires_at']}{msg_part}")
+                    f"| Expires: {f['expires_at']}{dl_part}{msg_part}")
             item = QListWidgetItem(txt)
             item.setData(Qt.UserRole, f["id"])
             self.list_incoming.addItem(item)
         self.apply_filter()
 
-    # ── users refresh ─────────────────────────────────────────────────────────
-
+    # בקשת רשימת המשתמשים המחוברים כרגע
     def refresh_users_online(self):
         t = UsersRefreshThread(self.server_url, self.current_user)
         t.done.connect(self._on_users_loaded)
         self._threads.append(t)
         t.start()
 
+    # שמירת רשימת המשתמשים ועדכון הממשק
     def _on_users_loaded(self, users):
         self._all_users_cache = users
         self.rebuild_receivers()
 
+    # עדכון רשימת המשתמשים בתיבת הבחירה של הנמענים
     def rebuild_receivers(self):
-        filter_text = self.input_filter.text().lower()
-        self.combo_receiver.blockSignals(True)
-        self.combo_receiver.clear()
-        for display, username in self._all_users_cache:
-            if filter_text in username.lower():
-                self.combo_receiver.addItem(display, userData=username)
-        self.combo_receiver.blockSignals(False)
+        # עדכון המשלים האוטומטי (Completer) עם שמות המשתמשים
+        all_usernames = [u for _, u in self._all_users_cache]
+        
+        # יצירת מודל חדש עבור רשימת ההשלמה
+        from PyQt5.QtCore import QStringListModel
+        model = QStringListModel(all_usernames)
+        self.completer.setModel(model)
 
+    # רענון רשימת המשלים האוטומטי
     def filter_users_combo(self):
         self.rebuild_receivers()
 
-    # ── filter incoming list ──────────────────────────────────────────────────
-
+    # סינון רשימת הקבצים לפי טקסט החיפוש
     def apply_filter(self):
         filter_text = self.input_filter.text().lower()
         for i in range(self.list_incoming.count()):
             item = self.list_incoming.item(i)
             item.setHidden(filter_text not in item.text().lower())
 
-    # ── download ──────────────────────────────────────────────────────────────
-
+    # הורדת הקובץ שנבחר מהרשימה ושמירתו במחשב
     def download_selected(self):
         item = self.list_incoming.currentItem()
         if not item:
@@ -307,6 +325,7 @@ class SendFileWindow(QMainWindow):
         self._threads.append(t)
         t.start()
 
+    # עיבוד הקובץ שהורד ושמירתו במחשב המשתמש
     def _on_download_done(self, data):
         self.btn_download.setEnabled(True)
         self.btn_download.setText("Download")
@@ -320,6 +339,7 @@ class SendFileWindow(QMainWindow):
             QMessageBox.information(self, "Success",
                                     "File saved successfully")
 
+    # הודעה למשתמש אם ההורדה נכשלה
     def _on_download_error(self, msg):
         self.btn_download.setEnabled(True)
         self.btn_download.setText("Download")

@@ -15,7 +15,8 @@ class Home(QMainWindow):
         self.is_admin = is_admin
 
         self.button_sendfile.clicked.connect(self.open_send_file)
-        self.button_sendedfile.clicked.connect(self.open_sended_files)
+        self.button_sendedfile.clicked.connect(self.open_print_window)
+        self.button_sendedfile.setText("Print files")
 
         self.label_logout = QLabel(
             '<a href="#" style="text-decoration: none; color: #0066cc;">Logout</a>',
@@ -70,13 +71,14 @@ class Home(QMainWindow):
     def _return_from_sendfile(self):
         self.show()
 
-    def open_sended_files(self):
-        from Client.sended_files_window import SendedFilesWindow
-        self.sended_files_window = SendedFilesWindow(
+    # פתיחת חלון ההדפסה וניהול הקבצים (לשעבר קבצים שנשלחו)
+    def open_print_window(self):
+        from Client.printwindow import PrintWindow
+        self.print_window = PrintWindow(
             current_user=self.current_user,
             server_url=self.server_url
         )
-        self.sended_files_window.show()
+        self.print_window.show()
 
     def open_admin_window(self):
         from Client.admin_window import AdminWindow

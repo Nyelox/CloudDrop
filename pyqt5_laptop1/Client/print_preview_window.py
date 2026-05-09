@@ -40,6 +40,7 @@ class SocketPrintThread(QThread):
         self.port      = port
         self.pdf_bytes = pdf_bytes
 
+    # הפונקציה המרכזית שמריצה את שליחת הנתונים למדפסת ברקע
     def run(self):
         try:
             sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
@@ -60,9 +61,61 @@ class SocketPrintThread(QThread):
         except Exception as e:
             self.error.emit(str(e))
 
+
+# ── Printer Scan thread ───────────────────────────────────────────────────────
+
+class PrinterScanThread(QThread):
+    """Scans the local network for devices with port 9100 open."""
+    found_printer = pyqtSignal(str)   # emits IP
+    finished      = pyqtSignal()
+
+    # הפונקציה המרכזית שמבצעת את סריקת הרשת למציאת מדפסות
+    def run(self):
+        try:
+            import socket
+            from concurrent.futures import ThreadPoolExecutor
+            
+            # Get local IP
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            local_ip = s.getsockname()[0]
+            s.close()
+            
+            prefix = ".".join(local_ip.split(".")[:-1])
+            common_ports = [9100, 515, 631, 80, 443]
+
+            def check_ip(ip):
+                for port in common_ports:
+                    try:
+                        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        sock.settimeout(1.0) # Maximum patience
+                        res = sock.connect_ex((ip, port))
+                        sock.close()
+                        if res == 0:
+                            return ip
+                    except:
+                        pass
+                return None
+
+            # Scan all 254 IPs in parallel with more workers
+            with ThreadPoolExecutor(max_workers=100) as executor:
+                ips_to_check = [f"{prefix}.{i}" for i in range(1, 255) if f"{prefix}.{i}" != local_ip]
+                results = executor.map(check_ip, ips_to_check)
+                for ip in results:
+                    if ip:
+                        # Skip common gateway IPs (likely routers)
+                        if not (ip.endswith(".1") or ip.endswith(".254")):
+                            self.found_printer.emit(ip)
+            
+            self.finished.emit()
+        except Exception as e:
+            print(f"Scan error: {e}")
+            self.finished.emit()
+
 # ── Main dialog ───────────────────────────────────────────────────────────────
 
 class PrintPreviewWindow(QDialog):
+    # פונקציית האתחול של החלון - מגדירה משתנים וטוענת את העיצוב
     def __init__(self, pdf_bytes: bytes, filename: str,
                  job_id: int, server_url: str, operator: str,
                  parent=None):
@@ -86,6 +139,7 @@ class PrintPreviewWindow(QDialog):
 
     # ── initial setup ────────────────────────────────────────────────────────
 
+    # הגדרת כפתורים, חיבור אירועים וטעינת רשימת מדפסות ה-Windows
     def _setup_ui(self):
         self.label_title.setText(self.filename)
 
@@ -107,15 +161,68 @@ class PrintPreviewWindow(QDialog):
         # buttons
         self.btn_close.clicked.connect(self.reject)
         self.btn_print.clicked.connect(self._do_print)
+        self.btn_scan.clicked.connect(self._scan_network)
+        
+        # Auto-find IPs of installed printers
+        self._find_installed_printer_ips()
 
+    # חיפוש כתובות IP של מדפסות שכבר מותקנות על המחשב (כגיבוי)
+    def _find_installed_printer_ips(self):
+        """Tries to find IPs of printers already installed on this Windows machine."""
+        try:
+            import subprocess
+            # Use wmic to get printer port names (often contain IPs)
+            cmd = "wmic printer get name,portname"
+            out = subprocess.check_output(cmd, shell=True, universal_newlines=True)
+            
+            import re
+            ip_pattern = re.compile(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}')
+            
+            found_ips = set()
+            for line in out.splitlines():
+                matches = ip_pattern.findall(line)
+                for ip in matches:
+                    if ip != "127.0.0.1" and not (ip.endswith(".1") or ip.endswith(".254")):
+                        found_ips.add(ip)
+            
+            for ip in found_ips:
+                if self.combo_network_printers.findText(ip) < 0:
+                    self.combo_network_printers.addItem(ip)
+        except:
+            pass
+
+    # עדכון הממשק (הצגת/הסתרת שדות) כאשר המשתמש בוחר סוג מדפסת
     def _on_radio_changed(self):
         win_mode = self.radio_windows.isChecked()
         self.combo_printers.setEnabled(win_mode)
-        self.input_ip.setEnabled(not win_mode)
-        self.input_port.setEnabled(not win_mode)
+        self.combo_network_printers.setEnabled(not win_mode)
+        self.btn_scan.setEnabled(not win_mode)
+        if hasattr(self, 'input_manual_ip'):
+            self.input_manual_ip.setEnabled(not win_mode)
+
+    # הפעלת תהליך סריקת הרשת למציאת מדפסות חדשות
+    def _scan_network(self):
+        self.btn_scan.setEnabled(False)
+        self.btn_scan.setText("Scanning...")
+        self.combo_network_printers.clear()
+        
+        t = PrinterScanThread()
+        t.found_printer.connect(lambda ip: self.combo_network_printers.addItem(ip))
+        t.finished.connect(self._on_scan_finished)
+        self._threads.append(t)
+        t.start()
+
+    def _on_scan_finished(self):
+        self.btn_scan.setEnabled(True)
+        self.btn_scan.setText("Scan Network")
+        if self.combo_network_printers.count() == 0:
+            QMessageBox.information(self, "Scan Result", "No network printers found.")
+        else:
+            self.combo_network_printers.showPopup()
 
     # ── PDF rendering ────────────────────────────────────────────────────────
 
+    # הפיכת דפי ה-PDF לתמונות והצגתם בחלון התצוגה המקדימה
     def _render_pages(self):
         try:
             import fitz
@@ -153,6 +260,7 @@ class PrintPreviewWindow(QDialog):
 
     # ── print dispatch ────────────────────────────────────────────────────────
 
+    # הפונקציה המרכזית שמתחילה את תהליך ההדפסה לפי הבחירה
     def _do_print(self):
         self.btn_print.setEnabled(False)
 
@@ -165,21 +273,22 @@ class PrintPreviewWindow(QDialog):
                 return
             self._print_windows(printer_name)
         else:
-            ip   = self.input_ip.text().strip()
-            port_txt = self.input_port.text().strip()
+            # 1. Try combo first
+            ip = self.combo_network_printers.currentText().strip()
+            # 2. Try manual entry if combo is empty
             if not ip:
-                QMessageBox.warning(self, "Missing IP",
-                                    "Please enter the printer's IP address.")
+                ip = self.input_manual_ip.text().strip()
+            
+            if not ip:
+                QMessageBox.warning(self, "No Printer",
+                                    "Please scan and select a network printer or enter IP manually.")
                 self.btn_print.setEnabled(True)
                 return
-            try:
-                port = int(port_txt)
-            except ValueError:
-                port = 9100
-            self._print_socket(ip, port)
+            self._print_socket(ip, 9100)
 
     # ── Windows printer ───────────────────────────────────────────────────────
 
+    # ביצוע הדפסה דרך הדרייברים של Windows
     def _print_windows(self, printer_name: str):
         self.btn_print.setText("Printing…")
         try:
@@ -239,6 +348,7 @@ class PrintPreviewWindow(QDialog):
 
     # ── Network / Socket printer ──────────────────────────────────────────────
 
+    # ביצוע הדפסה ישירה למדפסת רשת (TCP)
     def _print_socket(self, host: str, port: int):
         self.btn_print.setText(f"Connecting to {host}:{port}…")
 
@@ -269,6 +379,7 @@ class PrintPreviewWindow(QDialog):
 
     # ── status update ─────────────────────────────────────────────────────────
 
+    # עדכון שרת הענן שההדפסה הסתיימה בהצלחה
     def _mark_printed(self):
         if self.job_id is None:
             return
